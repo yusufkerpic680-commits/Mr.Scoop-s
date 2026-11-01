@@ -18,7 +18,7 @@ jobs:
       - name: Install Capacitor & Dependencies
         run: |
           npm init -y
-          npm install @capacitor/core @capacitor/cli @capacitor/android @capacitor-community/admob
+          npm install @capacitor/core @capacitor/cli @capacitor/android @capacitor-community/admob@6.2.0
           npx cap init DondurmaOyunu com.dondurma.tycoon --web-dir www
           npx cap add android
 
@@ -30,12 +30,11 @@ jobs:
 
       - name: Build Android AAB
         run: |
-          npx cap copy android
           cd android
           ./gradlew bundleRelease
 
       - name: Upload AAB Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
-          name: app-release-aab
-          path: android/app/build/outputs/bundle/release/app-release-aab.aab
+          name: app-release-bundle
+          path: android/app/build/outputs/bundle/release/app-release.aab
