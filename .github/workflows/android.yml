@@ -3,6 +3,11 @@ name: Build Android App
 on:
   workflow_dispatch:
 
+env:
+  APP_ID: com.dondurma.tycoon
+  APP_NAME: Mr Scoops Truck
+  ADMOB_APP_ID: ca-app-pub-3940256099942544~3347511713
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -13,28 +18,98 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 18
-
-      - name: Install Capacitor & Dependencies
-        run: |
-          npm init -y
-          npm install @capacitor/core @capacitor/cli @capacitor/android @capacitor-community/admob@6.2.0
-          npx cap init DondurmaOyunu com.dondurma.tycoon --web-dir www
-          npx cap add android
+          node-version: 22
 
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
-          java-version: '17'
+          distribution: temurin
+          java-version: 21
 
-      - name: Build Android AAB
+      - name: Prepare web files
         run: |
-          cd android
-          ./gradlew bundleRelease
+          mkdir -p www
+          if [ ! -f www/index.html ]; then
+            f=$(ls *.html 2>/dev/null | head -n 1)
+            if [ -z "$f" ]; then echo "HATA: depoda .html dosyasi yok"; exit 1; fi
+            cp "$f" www/index.html
+          fi
+          ls -la www
 
-      - name: Upload AAB Artifact
+      - name: Install Capacitor
+        run: |
+          [ -f package.json ] || npm init -y
+          npm install @capacitor/core@8 @capacitor/android@8 @capacitor-community/admob@8
+          npm install -D @capacitor/cli@8
+          cat > capacitor.config.json <<EOF
+          {"appId":"$APP_ID","appName":"$APP_NAME","webDir":"www"}
+          EOF
+
+      - name: Create Android project
+        run: |
+          [ -d android ] || npx cap add android
+          if [ -f assets/icon-only.png ]; then
+            npm install -D @capacitor/assets
+            npx capacitor-assets generate --android
+          fi
+
+      - name: Apply ad id, version and signing
+        env:
+          RUN: ${{ github.run_number }}
+        run: |
+          python3 - <<'PY'
+          import re,os
+          m='android/app/src/main/AndroidManifest.xml'
+          s=open(m,encoding='utf-8').read()
+          meta='<meta-data android:name="com.google.android.gms.ads.APPLICATION_ID" android:value="%s"/>'%os.environ['ADMOB_APP_ID']
+          if 'APPLICATION_ID' not in s:
+              s=s.replace('</application>',meta+'\n    </application>',1)
+          open(m,'w',encoding='utf-8').write(s)
+          g='android/app/build.gradle'
+          t=open(g,encoding='utf-8').read()
+          t=re.sub(r'versionCode \d+','versionCode '+os.environ['RUN'],t,1)
+          t=t.replace('buildTypes {','signingConfigs {\n        release {\n            storeFile file(System.getenv("KS_FILE"))\n            storePassword System.getenv("KS_PASS")\n            keyAlias System.getenv("KS_ALIAS")\n            keyPassword System.getenv("KS_PASS")\n        }\n    }\n    buildTypes {',1)
+          t=re.sub(r'(buildTypes \{\s*release \{)',r'\1\n            signingConfig signingConfigs.release',t,1)
+          open(g,'w',encoding='utf-8').write(t)
+          PY
+
+      - name: Prepare signing key
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          KS_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "KS_PASS=$KS_PASSWORD" >> "$GITHUB_ENV"
+          else
+            PASS=$(openssl rand -hex 12)
+            keytool -genkeypair -keystore "$RUNNER_TEMP/release.jks" -alias upload -keyalg RSA -keysize 2048 -validity 10000 -storepass "$PASS" -keypass "$PASS" -dname "CN=Dondurma, O=Dondurma, C=TR"
+            mkdir keystore-out
+            cp "$RUNNER_TEMP/release.jks" keystore-out/release.jks
+            echo "alias: upload   password: $PASS" > keystore-out/PASSWORD.txt
+            echo "KS_PASS=$PASS" >> "$GITHUB_ENV"
+          fi
+          echo "KS_ALIAS=upload" >> "$GITHUB_ENV"
+          echo "KS_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
+      - name: Sync and build
+        run: |
+          npx cap sync android
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease bundleRelease --no-daemon
+
+      - name: Upload app files
         uses: actions/upload-artifact@v4
         with:
-              name: app-release-bundle
-              path: android/app/build/outputs/bundle/release/app-release.aab
+          name: app-files
+          path: |
+            android/app/build/outputs/apk/release/*.apk
+            android/app/build/outputs/bundle/release/*.aab
+
+      - name: Upload signing key
+        if: ${{ hashFiles('keystore-out/*') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: SAVE-THIS-keystore
+          path: keystore-out/
